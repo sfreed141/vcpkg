@@ -30,14 +30,16 @@ namespace vcpkg::Commands::CI
     static constexpr StringLiteral OPTION_EXCLUDE = "--exclude";
     static constexpr StringLiteral OPTION_PURGE_TOMBSTONES = "--purge-tombstones";
     static constexpr StringLiteral OPTION_XUNIT = "--x-xunit";
+    static constexpr StringLiteral OPTION_RANDOMIZE = "--x-randomize";
 
     static constexpr std::array<CommandSetting, 2> CI_SETTINGS = {{
         {OPTION_EXCLUDE, "Comma separated list of ports to skip"},
         {OPTION_XUNIT, "File to output results in XUnit format (internal)"},
     }};
 
-    static constexpr std::array<CommandSwitch, 2> CI_SWITCHES = {{
+    static constexpr std::array<CommandSwitch, 3> CI_SWITCHES = {{
         {OPTION_DRY_RUN, "Print out plan without execution"},
+        {OPTION_RANDOMIZE, "Randomize the install order"},
         {OPTION_PURGE_TOMBSTONES, "Purge failure tombstones and retry building the ports"},
     }};
 
@@ -69,7 +71,7 @@ namespace vcpkg::Commands::CI
         std::map<PackageSpec, std::string> abi_tag_map;
         std::set<PackageSpec> will_fail;
 
-        const Build::BuildPackageOptions install_plan_options = {
+        const Build::BuildPackageOptions build_options = {
             Build::UseHeadVersion::NO,
             Build::AllowDownloads::YES,
             Build::CleanBuildtrees::YES,
@@ -81,7 +83,9 @@ namespace vcpkg::Commands::CI
 
         vcpkg::Cache<Triplet, Build::PreBuildInfo> pre_build_info_cache;
 
-        auto action_plan = Dependencies::create_feature_install_plan(provider, fspecs, StatusParagraphs {});
+        auto action_plan = Dependencies::create_feature_install_plan(provider, fspecs, {}, {});
+
+        auto timer = Chrono::ElapsedTimer::create_started();
 
         for (auto&& action : action_plan)
         {
@@ -94,7 +98,7 @@ namespace vcpkg::Commands::CI
                     auto triplet = p->spec.triplet();
 
                     const Build::BuildPackageConfig build_config {
-                        *scf, triplet, paths.port_dir(p->spec), install_plan_options, p->feature_list};
+                        *scf, triplet, paths.port_dir(p->spec), build_options, p->feature_list};
 
                     auto dependency_abis =
                         Util::fmap(p->computed_dependencies, [&](const PackageSpec& spec) -> Build::AbiEntry {
@@ -174,6 +178,8 @@ namespace vcpkg::Commands::CI
             }
         }
 
+        System::print("Time to determine pass/fail: %s\n", timer.elapsed().to_string());
+
         return ret;
     }
 
@@ -241,12 +247,29 @@ namespace vcpkg::Commands::CI
             for (auto&& fspec : fspecs)
                 pgraph.install(fspec);
 
+            Dependencies::CreateInstallPlanOptions serialize_options;
+
+            struct RandomizerStorage
+            {
+                std::random_device e;
+            };
+            std::unique_ptr<RandomizerStorage> randomizer_storage;
+            if (Util::Sets::contains(options.switches, OPTION_RANDOMIZE))
+            {
+                randomizer_storage = std::make_unique<RandomizerStorage>();
+                serialize_options.randomizer = [&](int i) -> int {
+                    if (i <= 1) return 0;
+                    std::uniform_int_distribution<int> d(0, i - 1);
+                    return d(randomizer_storage->e);
+                };
+            }
+
             auto action_plan = [&]() {
                 int iterations = 0;
                 do
                 {
                     bool inconsistent = false;
-                    auto action_plan = pgraph.serialize();
+                    auto action_plan = pgraph.serialize(serialize_options);
 
                     for (auto&& action : action_plan)
                     {

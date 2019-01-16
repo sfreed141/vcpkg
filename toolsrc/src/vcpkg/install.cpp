@@ -306,11 +306,11 @@ namespace vcpkg::Install
                 System::println("Building package %s... ", display_name_with_features);
 
             auto result = [&]() -> Build::ExtendedBuildResult {
-                const Build::BuildPackageConfig build_config{action.source_control_file.value_or_exit(VCPKG_LINE_INFO),
-                                                             action.spec.triplet(),
-                                                             paths.port_dir(action.spec),
-                                                             action.build_options,
-                                                             action.feature_list};
+                const Build::BuildPackageConfig build_config {action.source_control_file.value_or_exit(VCPKG_LINE_INFO),
+                                                              action.spec.triplet(),
+                                                              paths.port_dir(action.spec),
+                                                              action.build_options,
+                                                              action.feature_list};
                 return Build::build_package(paths, build_config, status_db);
             }();
 
@@ -420,7 +420,7 @@ namespace vcpkg::Install
             System::println("Elapsed time for package %s: %s", display_name, results.back().timing.to_string());
         }
 
-        return InstallSummary{std::move(results), timer.to_string()};
+        return InstallSummary {std::move(results), timer.to_string()};
     }
 
     static constexpr StringLiteral OPTION_DRY_RUN = "--dry-run";
@@ -701,7 +701,7 @@ namespace vcpkg::Install
     }
 
     SpecSummary::SpecSummary(const PackageSpec& spec, const Dependencies::AnyAction* action)
-        : spec(spec), build_result{BuildResult::NULLVALUE, nullptr}, action(action)
+        : spec(spec), build_result {BuildResult::NULLVALUE, nullptr}, action(action)
     {
     }
 

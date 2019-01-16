@@ -146,7 +146,7 @@ namespace vcpkg::Dependencies
     }
 
     InstallPlanAction::InstallPlanAction() noexcept
-        : plan_type(InstallPlanType::UNKNOWN), request_type(RequestType::UNKNOWN), build_options{}
+        : plan_type(InstallPlanType::UNKNOWN), request_type(RequestType::UNKNOWN), build_options {}
     {
     }
 
@@ -159,7 +159,7 @@ namespace vcpkg::Dependencies
         , source_control_file(scf)
         , plan_type(InstallPlanType::BUILD_AND_INSTALL)
         , request_type(request_type)
-        , build_options{}
+        , build_options {}
         , feature_list(features)
         , computed_dependencies(std::move(dependencies))
     {
@@ -172,7 +172,7 @@ namespace vcpkg::Dependencies
         , installed_package(std::move(ipv))
         , plan_type(InstallPlanType::ALREADY_INSTALLED)
         , request_type(request_type)
-        , build_options{}
+        , build_options {}
         , feature_list(features)
         , computed_dependencies(installed_package.get()->dependencies())
     {
@@ -344,9 +344,9 @@ namespace vcpkg::Dependencies
                 const StatusParagraphs::const_iterator it = status_db.find_installed(spec);
                 if (it == status_db.end())
                 {
-                    return RemovePlanAction{spec, RemovePlanType::NOT_INSTALLED, request_type};
+                    return RemovePlanAction {spec, RemovePlanType::NOT_INSTALLED, request_type};
                 }
-                return RemovePlanAction{spec, RemovePlanType::REMOVE, request_type};
+                return RemovePlanAction {spec, RemovePlanType::REMOVE, request_type};
             }
 
             std::string to_string(const PackageSpec& spec) const override { return spec.to_string(); }
@@ -354,7 +354,7 @@ namespace vcpkg::Dependencies
 
         auto installed_ports = get_installed_ports(status_db);
         const std::unordered_set<PackageSpec> specs_as_set(specs.cbegin(), specs.cend());
-        return Graphs::topological_sort(specs, RemoveAdjacencyProvider{status_db, installed_ports, specs_as_set});
+        return Graphs::topological_sort(specs, RemoveAdjacencyProvider {status_db, installed_ports, specs_as_set}, {});
     }
 
     std::vector<ExportPlanAction> create_export_plan(const std::vector<PackageSpec>& specs,
@@ -385,10 +385,10 @@ namespace vcpkg::Dependencies
 
                 if (auto p_ipv = maybe_ipv.get())
                 {
-                    return ExportPlanAction{spec, std::move(*p_ipv), request_type};
+                    return ExportPlanAction {spec, std::move(*p_ipv), request_type};
                 }
 
-                return ExportPlanAction{spec, request_type};
+                return ExportPlanAction {spec, request_type};
             }
 
             std::string to_string(const PackageSpec& spec) const override { return spec.to_string(); }
@@ -396,7 +396,7 @@ namespace vcpkg::Dependencies
 
         const std::unordered_set<PackageSpec> specs_as_set(specs.cbegin(), specs.cend());
         std::vector<ExportPlanAction> toposort =
-            Graphs::topological_sort(specs, ExportAdjacencyProvider{status_db, specs_as_set});
+            Graphs::topological_sort(specs, ExportAdjacencyProvider {status_db, specs_as_set}, {});
         return toposort;
     }
 
@@ -582,7 +582,7 @@ namespace vcpkg::Dependencies
                 {
                     System::println(System::Color::warning,
                                     "Warning: could not reinstall feature %s",
-                                    FeatureSpec{cluster.spec, f});
+                                    FeatureSpec {cluster.spec, f});
                 }
             }
 
@@ -598,20 +598,17 @@ namespace vcpkg::Dependencies
                     {
                         System::println(System::Color::warning,
                                         "Warning: could not install new default feature %s",
-                                        FeatureSpec{cluster.spec, default_feature});
+                                        FeatureSpec {cluster.spec, default_feature});
                     }
                 }
             }
         }
     }
 
-    /// <summary>Figure out which actions are required to install features specifications in `specs`.</summary>
-    /// <param name="provider">Contains the ports of the current environment.</param>
-    /// <param name="specs">Feature specifications to resolve dependencies for.</param>
-    /// <param name="status_db">Status of installed packages in the current environment.</param>
     std::vector<AnyAction> create_feature_install_plan(const PortFileProvider& provider,
                                                        const std::vector<FeatureSpec>& specs,
-                                                       const StatusParagraphs& status_db)
+                                                       const StatusParagraphs& status_db,
+                                                       const CreateInstallPlanOptions& options)
     {
         std::unordered_set<std::string> prevent_default_features;
         for (auto&& spec : specs)
@@ -628,7 +625,7 @@ namespace vcpkg::Dependencies
             pgraph.install(spec, prevent_default_features);
         }
 
-        return pgraph.serialize();
+        return pgraph.serialize(options);
     }
 
     /// <summary>Figure out which actions are required to install features specifications in `specs`.</summary>
@@ -661,7 +658,7 @@ namespace vcpkg::Dependencies
                            spec.feature(),
                            spec.name());
 
-        m_graph_plan->install_graph.add_vertex(ClusterPtr{&spec_cluster});
+        m_graph_plan->install_graph.add_vertex(ClusterPtr {&spec_cluster});
     }
 
     void PackageGraph::upgrade(const PackageSpec& spec) const
@@ -672,19 +669,21 @@ namespace vcpkg::Dependencies
         mark_minus(spec_cluster, *m_graph, *m_graph_plan, {});
     }
 
-    std::vector<AnyAction> PackageGraph::serialize() const
+    std::vector<AnyAction> PackageGraph::serialize(const CreateInstallPlanOptions& options) const
     {
         auto remove_vertex_list = m_graph_plan->remove_graph.vertex_list();
-        auto remove_toposort = Graphs::topological_sort(remove_vertex_list, m_graph_plan->remove_graph);
+        auto remove_toposort =
+            Graphs::topological_sort(remove_vertex_list, m_graph_plan->remove_graph, options.randomizer);
 
         auto insert_vertex_list = m_graph_plan->install_graph.vertex_list();
-        auto insert_toposort = Graphs::topological_sort(insert_vertex_list, m_graph_plan->install_graph);
+        auto insert_toposort =
+            Graphs::topological_sort(insert_vertex_list, m_graph_plan->install_graph, options.randomizer);
 
         std::vector<AnyAction> plan;
 
         for (auto&& p_cluster : remove_toposort)
         {
-            plan.emplace_back(RemovePlanAction{
+            plan.emplace_back(RemovePlanAction {
                 std::move(p_cluster->spec),
                 RemovePlanType::REMOVE,
                 p_cluster->request_type,
@@ -702,7 +701,7 @@ namespace vcpkg::Dependencies
                                             [](ClusterPtr const& p) { return p->spec; });
                 Util::sort_unique_erase(dep_specs);
 
-                plan.emplace_back(InstallPlanAction{
+                plan.emplace_back(InstallPlanAction {
                     p_cluster->spec,
                     *pscf,
                     p_cluster->to_install_features,
@@ -715,8 +714,8 @@ namespace vcpkg::Dependencies
                 // If the package isn't transitively installed, still include it if the user explicitly requested it
                 if (p_cluster->request_type != RequestType::USER_REQUESTED) continue;
                 auto&& installed = p_cluster->installed.value_or_exit(VCPKG_LINE_INFO);
-                plan.emplace_back(InstallPlanAction{
-                    InstalledPackageView{installed.ipv},
+                plan.emplace_back(InstallPlanAction {
+                    InstalledPackageView {installed.ipv},
                     installed.original_features,
                     p_cluster->request_type,
                 });
