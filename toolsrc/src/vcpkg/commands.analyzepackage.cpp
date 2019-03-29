@@ -162,6 +162,37 @@ namespace vcpkg::Commands::AnalyzePackage
         // Search for CMake targets in the .cmake files
         parse_cmake_targets(files, paths, cmake_info.config_files, cmake_info.library_targets);
 
+        if (cmake_info.library_targets.empty())
+        {
+            // If the port only provides a usage file, we try to find any packages it might provide
+            static const std::regex package_name_regex(R"(\bfind_package\(([^\s\)]+)\s)", std::regex_constants::ECMAScript);
+
+            std::sregex_iterator next(cmake_info.usage.cbegin(), cmake_info.usage.cend(), package_name_regex);
+            std::sregex_iterator last;
+
+            while (next != last)
+            {
+                auto match = *next;
+                cmake_info.library_targets.emplace(match[1], std::vector<std::string>{});
+
+                // TODO Scan for targets provided by the package
+                // std::regex target_regex(R"()", std::regex_constants::ECMAScript);
+                // std::sregex_iterator next_target(cmake_info.usage.cbegin(), cmake_info.usage.cend(), target_regex);
+                // std::sregex_iterator last_target;
+
+                // std::vector<std::string> targets;
+                // while (next_target != last_target)
+                // {
+                //     auto target_match = *next_target;
+                //     targets.push_back(target_match[2]);
+                //     ++next_target;
+                // }
+                // cmake_info.library_targets.emplace(match[1], targets);
+
+                ++next;
+            }
+        }
+
         return cmake_info;
     }
 
@@ -170,29 +201,10 @@ namespace vcpkg::Commands::AnalyzePackage
         std::vector<std::string> package_strs;
         if (cmake_info.library_targets.empty())
         {
-            // If the port only provides a usage file, we try to find any packages it might provide
-            static const std::regex package_name_regex(R"(\bfind_package\(([^\s\)]+)\s)", std::regex_constants::ECMAScript);
-
-            std::sregex_iterator next(cmake_info.usage.begin(), cmake_info.usage.end(), package_name_regex);
-            std::sregex_iterator last;
-
-            while (next != last)
-            {
-                auto match = *next;
-                // TODO scan for potential targets as well?
-                package_strs.push_back(Strings::format(
-                    R"(    "%s": { "name": "%s", "targets": [], "portName": "%s", "description": "%s" })",
-                    match[1], match[1], cmake_info.port_name, cmake_info.usage));
-                ++next;
-            }
-
             // If no packages found, they probably have to find and link manually. Enter a dummy value in the json just so we know about the port
-            if (package_strs.empty())
-            {
-                package_strs.push_back(Strings::format(
-                    R"(    "_%s": { "name": "_%s", "targets": [], "portName": "%s", "description": "%s" })",
-                    cmake_info.port_name, cmake_info.port_name, cmake_info.port_name, cmake_info.usage));
-            }
+            package_strs.push_back(Strings::format(
+                R"(    "_%s": { "name": "_%s", "targets": [], "portName": "%s", "description": "%s" })",
+                cmake_info.port_name, cmake_info.port_name, cmake_info.port_name, cmake_info.usage));
         }
         else
         {
@@ -202,14 +214,17 @@ namespace vcpkg::Commands::AnalyzePackage
             {
                 auto config_it = cmake_info.config_files.find(library_target_pair.first);
 
-                // TODO should update cmake_info package name and use in other function
                 const auto package_name = config_it != cmake_info.config_files.end() ? config_it->second : library_target_pair.first;
 
                 // sort the target names alphabetically (to make output deterministic)
                 std::sort(library_target_pair.second.begin(), library_target_pair.second.end());
 
-                cmake_info.usage = Strings::format("The package %s provides CMake targets:\\r\\n\\r\\n    find_package(%s CONFIG REQUIRED)\\r\\n    target_link_libraries(main PRIVATE %s)\\r\\n",
-                    cmake_info.port_name, package_name, Strings::join(" ", library_target_pair.second));
+                // If no usage message then generate one from the known package and targets
+                if (cmake_info.usage.empty())
+                {
+                    cmake_info.usage = Strings::format("The package %s provides CMake targets:\\r\\n\\r\\n    find_package(%s CONFIG REQUIRED)\\r\\n    target_link_libraries(main PRIVATE %s)\\r\\n",
+                        cmake_info.port_name, package_name, Strings::join(" ", library_target_pair.second));
+                }
 
                 package_strs.push_back(Strings::format(
                     R"(    "%s": { "name": "%s", "targets": ["%s"], "portName": "%s", "description": "%s" })",
