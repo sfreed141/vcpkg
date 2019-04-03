@@ -16,21 +16,23 @@ namespace vcpkg::Commands::AnalyzePackage
 {
     static constexpr StringLiteral OPTION_QUIET = "--quiet";
 
+    static constexpr StringLiteral OPTION_INFILE = "--infile";
     static constexpr StringLiteral OPTION_OUTFILE = "--outfile";
 
     static constexpr std::array<CommandSwitch, 1> ANALYZE_SWITCHES = {{
         {OPTION_QUIET, "Suppresses extra status messages"},
     }};
 
-    static constexpr std::array<CommandSetting, 1> ANALYZE_SETTINGS = {{
+    static constexpr std::array<CommandSetting, 2> ANALYZE_SETTINGS = {{
+        {OPTION_INFILE, "Read packages from file instead of command line (one package per line)"},
         {OPTION_OUTFILE, "Output to file instead of stdout"}
     }};
 
     const CommandStructure COMMAND_STRUCTURE = {
         Strings::format(
             "Analyzes and outputs CMake usage information from one or more provided zipped packages.\n%s",
-            Help::create_example_string("x-analyze-package package.zip")),
-        1,
+            Help::create_example_string("x-analyze-package [--quiet] [--outfile=<output filename>] <--infile=<input filename> | package1.zip package2.zip ...>")),
+        0,
         SIZE_MAX,
         { ANALYZE_SWITCHES, ANALYZE_SETTINGS },
         nullptr
@@ -51,6 +53,17 @@ namespace vcpkg::Commands::AnalyzePackage
         ConfigMap config_files;
         TargetMap library_targets;
     };
+
+    static std::string escape_string(const std::string& s)
+    {
+        auto result = s;
+
+        result = Strings::replace_all(std::move(result), "\r", "\\r");
+        result = Strings::replace_all(std::move(result), "\n", "\\n");
+        result = Strings::replace_all(std::move(result), "\"", "\\\"");
+
+        return std::move(result);
+    }
 
     static void parse_cmake_targets(const std::vector<fs::path>& files, const VcpkgPaths& paths, ConfigMap& config_files, TargetMap& library_targets)
     {
@@ -98,13 +111,19 @@ namespace vcpkg::Commands::AnalyzePackage
         }
     }
 
-    static CMakeInfo get_cmake_information(const fs::path& package_root, const VcpkgPaths& paths) {
+    static CMakeInfo get_cmake_information(const fs::path& package_root, const VcpkgPaths& paths)
+    {
         const auto& fs = paths.get_filesystem();
 
         CMakeInfo cmake_info;
 
         // Parse the CONTROL file to get basic metadata
         const auto control_path = package_root / "CONTROL";
+        if (!std::filesystem::exists(control_path))
+        {
+            throw std::runtime_error(Strings::format("%s does not exist.", control_path.string()));
+        }
+
         auto pghs = Paragraphs::get_paragraphs(fs, control_path);
         if (auto p = pghs.get())
         {
@@ -123,7 +142,7 @@ namespace vcpkg::Commands::AnalyzePackage
 
             if (first.count("Description") > 0)
             {
-                cmake_info.port_description = first["Description"];
+                cmake_info.port_description = escape_string(first["Description"]);
             }
         }
         else
@@ -142,19 +161,7 @@ namespace vcpkg::Commands::AnalyzePackage
                 auto maybe_contents = fs.read_contents(usage_file);
                 if (auto p_contents = maybe_contents.get())
                 {
-                    cmake_info.usage = *p_contents;
-
-                    // escape all newlines
-                    // TODO gotta be a better way? also small optimization use pos in find arg to avoid researching beginning of string (dont forget reset for loop 2)
-                    size_t pos = 0;
-                    while ((pos = cmake_info.usage.find("\r\n", pos)) != std::string::npos) {
-                        cmake_info.usage.replace(pos, 2, "\\r\\n", 4);
-                    }
-
-                    pos = 0;
-                    while ((pos = cmake_info.usage.find("\n"), pos) != std::string::npos) {
-                        cmake_info.usage.replace(pos, 1, "\\n", 2);
-                    }
+                    cmake_info.usage = escape_string(*p_contents);
                 }
             }
         }
@@ -196,43 +203,71 @@ namespace vcpkg::Commands::AnalyzePackage
         return cmake_info;
     }
 
-    static std::tuple<std::string, std::vector<std::string>> generate_cmake_info_json(CMakeInfo& cmake_info)
+    static std::vector<std::string> generate_package_info_json(CMakeInfo& cmake_info)
     {
         std::vector<std::string> package_strs;
-        if (cmake_info.library_targets.empty())
-        {
-            // If no packages found, they probably have to find and link manually. Enter a dummy value in the json just so we know about the port
-            package_strs.push_back(Strings::format(
-                R"(    "_%s": { "name": "_%s", "targets": [], "portName": "%s", "description": "%s" })",
-                cmake_info.port_name, cmake_info.port_name, cmake_info.port_name, cmake_info.usage));
-        }
-        else
-        {
-            package_strs.reserve(cmake_info.library_targets.size());
+        package_strs.reserve(cmake_info.library_targets.size());
 
-            for (auto&& library_target_pair : cmake_info.library_targets)
+        for (auto&& library_target_pair : cmake_info.library_targets)
+        {
+            auto config_it = cmake_info.config_files.find(library_target_pair.first);
+
+            const auto package_name = config_it != cmake_info.config_files.end() ? config_it->second : library_target_pair.first;
+
+            // sort the target names alphabetically (to make output deterministic)
+            std::sort(library_target_pair.second.begin(), library_target_pair.second.end());
+
+            // If no usage message then generate one from the known package and targets
+            if (cmake_info.usage.empty())
             {
-                auto config_it = cmake_info.config_files.find(library_target_pair.first);
-
-                const auto package_name = config_it != cmake_info.config_files.end() ? config_it->second : library_target_pair.first;
-
-                // sort the target names alphabetically (to make output deterministic)
-                std::sort(library_target_pair.second.begin(), library_target_pair.second.end());
-
-                // If no usage message then generate one from the known package and targets
-                if (cmake_info.usage.empty())
-                {
-                    cmake_info.usage = Strings::format("The package %s provides CMake targets:\\r\\n\\r\\n    find_package(%s CONFIG REQUIRED)\\r\\n    target_link_libraries(main PRIVATE %s)\\r\\n",
-                        cmake_info.port_name, package_name, Strings::join(" ", library_target_pair.second));
-                }
-
-                package_strs.push_back(Strings::format(
-                    R"(    "%s": { "name": "%s", "targets": ["%s"], "portName": "%s", "description": "%s" })",
-                    package_name, package_name, Strings::join("\", \"", library_target_pair.second), cmake_info.port_name, cmake_info.usage));
+                cmake_info.usage = Strings::format("The package %s provides CMake targets:\\r\\n\\r\\n    find_package(%s CONFIG REQUIRED)\\r\\n    target_link_libraries(main PRIVATE %s)\\r\\n",
+                    cmake_info.port_name, package_name, Strings::join(" ", library_target_pair.second));
             }
+
+            package_strs.push_back(Strings::format(
+                R"(    "%s": { "name": "%s", "targets": ["%s"], "portName": "%s", "portDescription": "%s", "description": "%s" })",
+                package_name, package_name, Strings::join("\", \"", library_target_pair.second), cmake_info.port_name, cmake_info.port_description, cmake_info.usage));
         }
 
-        return std::make_pair(cmake_info.port_name, package_strs);
+        return package_strs;
+    }
+
+    static std::string generate_cmake_info_json(std::vector<CMakeInfo>& cmake_info)
+    {
+        std::vector<std::string> package_strs;
+
+        for (auto& info : cmake_info)
+        {
+            auto packages = generate_package_info_json(info);
+            package_strs.insert(package_strs.cend(), packages.begin(), packages.end());
+        }
+
+        auto json_output = Strings::format("{\n%s\n}\n", Strings::join(",\n", package_strs));
+
+        return json_output;
+    }
+
+    static CMakeInfo extract_and_get_info(const fs::path& path, const fs::path& temp_dir, const VcpkgPaths& paths)
+    {
+        if (!quiet_output)
+            System::print(Strings::format("Processing %s...", path.string()));
+
+        const auto to_path = temp_dir / path.stem();
+
+        if (!std::filesystem::exists(to_path))
+        {
+            Archives::extract_archive(paths, path, to_path);
+        }
+
+        auto info = get_cmake_information(to_path, paths);
+
+        if (!quiet_output)
+        {
+            System::println("done (port '%s' provides %d package%s)",
+                info.port_name, info.library_targets.size(), info.library_targets.size() == 1 ? "" : "s");
+        }
+
+        return info;
     }
 
     void perform_and_exit(const VcpkgCmdArguments& args, const VcpkgPaths& paths)
@@ -247,7 +282,7 @@ namespace vcpkg::Commands::AnalyzePackage
         auto it_outfile = options.settings.find(OPTION_OUTFILE);
         if (it_outfile != options.settings.end())
         {
-            auto outfile_path = std::filesystem::canonical(fs::path(it_outfile->second));
+            auto outfile_path = std::filesystem::weakly_canonical(fs::path(it_outfile->second));
 
             try
             {
@@ -263,38 +298,63 @@ namespace vcpkg::Commands::AnalyzePackage
                 System::println("Output will be written to '%s'.", outfile_path.string());
         }
 
+        // Check if we should read packages from file
+        std::ifstream infile;
+        auto it_infile = options.settings.find(OPTION_INFILE);
+        if (it_infile != options.settings.end())
+        {
+            auto infile_path = std::filesystem::canonical(fs::path(it_infile->second));
+
+            try
+            {
+                infile.open(infile_path);
+            }
+            catch (std::ios_base::failure e)
+            {
+                Checks::check_exit(VCPKG_LINE_INFO, infile.is_open(),
+                    Strings::format("Failed opening input file '%s': %s", infile_path.string(), e.what()));
+            }
+
+            if (!quiet_output)
+                System::println("Input will be read from '%s'.", infile_path.string());
+        }
+
+        std::vector<std::string> package_zips;
+        if (infile.is_open())
+        {
+            std::string line;
+            while (std::getline(infile, line))
+            {
+                package_zips.push_back(line);
+            }
+            Strings::trim_all_and_remove_whitespace_strings(&package_zips);
+        }
+        else
+        {
+            package_zips.insert(package_zips.cend(), args.command_arguments.begin(), args.command_arguments.end());
+        }
+
         // The zips will be extracted to a temporary directory (and deleted later)
         std::error_code error;
         const auto temp_dir = std::filesystem::temp_directory_path(error) / "vcpkg";
         Checks::check_exit(VCPKG_LINE_INFO, !error,
             "Failed opening temp directory: %s", error.message());
 
-        std::vector<std::string> packages;
-        for (const auto& path_str : args.command_arguments)
+        std::vector<CMakeInfo> cmake_info;
+        for (const auto& path_str : package_zips)
         {
-            if (!quiet_output)
-                System::print(Strings::format("Processing %s...", path_str));
-
             const auto path = fs::path(path_str);
-            const auto to_path = temp_dir / path.stem();
-
-            // TODO only extract necessary files
-            Archives::extract_archive(paths, path, to_path);
-
-            auto cmake_info = get_cmake_information(to_path, paths);
-            auto [portName, package_strs] = generate_cmake_info_json(cmake_info);
-
-            if (!quiet_output)
+            try
             {
-                System::println("done (port '%s' provides %d target%s)",
-                    portName, package_strs.size(), package_strs.size() == 1 ? "" : "s");
+                cmake_info.push_back(extract_and_get_info(path, temp_dir, paths));
             }
-
-            packages.insert(packages.cend(), package_strs.begin(), package_strs.end());
+            catch (std::runtime_error e)
+            {
+                System::println(Strings::format("failed: %s", e.what()));
+            }
         }
 
-        auto output = Strings::format("%s,\n", Strings::join(",\n", packages));
-        // auto output = Strings::format("{\n%s\n}\n", Strings::join(",\n", packages));
+        auto output = generate_cmake_info_json(cmake_info);
 
         if (outfile.is_open())
         {
